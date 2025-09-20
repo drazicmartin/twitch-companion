@@ -1,0 +1,12 @@
+[project]
+name = "twitch-companion"
+version = "0.1.0"
+description = "An interactive Twitch Companion powered by AI to assist your stream."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "streamlink",
+    "ffmpeg-python",
+    "openai-whisper"
+]
