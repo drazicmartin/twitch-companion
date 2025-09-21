@@ -10,3 +10,6 @@ dependencies = [
     "ffmpeg-python",
     "openai-whisper"
 ]
+
+[tool.setuptools.packages.find]
+include = ["twitchcompanion*"]

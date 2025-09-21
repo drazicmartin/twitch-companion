@@ -1,16 +1,13 @@
-import contextlib
-import msvcrt
 import os
 import time
-import wave
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 
-import webrtcvad
 import whisper
 
 from twitchcompanion.logger import logger as MainLogger
+from twitchcompanion.utils import get_create_time, has_speech
 
 # create a child logger
 logger = MainLogger.getChild(__name__)
@@ -19,62 +16,8 @@ logger = MainLogger.getChild(__name__)
 logger.disabled = False
 
 
-def has_speech(wav_path: str, aggressiveness: int = 1) -> bool:
-    """
-    Return True if speech is detected in the WAV file.
-    
-    aggressiveness: 0 (least) -> 3 (most aggressive)
-    """
-    return True
-    vad = webrtcvad.Vad(aggressiveness)
-
-    with contextlib.closing(wave.open(str(wav_path), 'rb')) as wf:
-        sample_rate = wf.getframerate()
-        if sample_rate not in (8000, 16000, 32000, 48000):
-            raise ValueError("webrtcvad only supports 8,16,32,48kHz audio")
-        n_channels = wf.getnchannels()
-        if n_channels != 1:
-            raise ValueError("webrtcvad only supports mono audio")
-        
-        frame_duration = 30  # ms
-        frame_size = int(sample_rate * frame_duration / 1000) * 2  # 16-bit samples
-        
-        has_voice = False
-        while True:
-            frame = wf.readframes(frame_size // 2)
-            if len(frame) < frame_size:
-                break
-            if vad.is_speech(frame, sample_rate):
-                has_voice = True
-                break
-        return has_voice
-
-def is_valid_wav(wav_path: str) -> bool:
-    """
-    Check if a WAV file is valid.
-    Returns True if it can be opened and has >0 frames, mono/stereo.
-    """
-    try:
-        with contextlib.closing(wave.open(str(wav_path), 'rb')) as wf:
-            n_channels = wf.getnchannels()
-            sample_rate = wf.getframerate()
-            n_frames = wf.getnframes()
-            if n_frames == 0:
-                return False
-            if n_channels not in (1, 2):
-                return False
-            if sample_rate not in (8000, 16000, 32000, 44100, 48000):
-                return False
-    except (wave.Error, EOFError, FileNotFoundError):
-        return False
-    return True
-
-def get_create_time(file_path: str) -> float:
-    return os.path.getctime(file_path)
-
-
 class TwitchTranscriber:
-    def __init__(self, audio_dir: str, segment_time: int, whisper_model_size: str = "medium",  n_models: int = 1):
+    def __init__(self, audio_dir: str, segment_time: int, whisper_model_size: str = "medium",  n_models: int = 1, words_file: str = None):
         self.audio_dir = Path(audio_dir)
         self.out_file = self.audio_dir.parent / "transcript.txt"
         self.running = True
@@ -85,7 +28,14 @@ class TwitchTranscriber:
         self.n_models = n_models
         self.worker_threads = []
         logger.info(f"Loading {n_models} Whisper models of size '{whisper_model_size}'...")
-        self.models = [whisper.load_model(whisper_model_size, device="cuda") for _ in range(n_models)]
+        self.models = [whisper.load_model(whisper_model_size) for _ in range(n_models)]
+
+        self.flagged = False
+        self.flag_words = []
+        if words_file is not None:
+            with open(words_file, 'r') as f:
+                lines = f.readlines()
+            self.flag_words = lines
 
         # Queue of files ready to transcribe
         self.file_queue = Queue()
@@ -114,6 +64,13 @@ class TwitchTranscriber:
                     logger.debug(f"Retrying delete of {path}")
                     time.sleep(0.5)
 
+    def flag_check(self, transcription: str):
+        transcription_lower = transcription.lower()
+        for word in self.flag_words:
+            if word in transcription_lower:
+                return True
+        return False
+
     def _scanner_loop(self):
         """Continuously scan the folder for ready files and put them in queue."""
         seen = set()
@@ -121,7 +78,7 @@ class TwitchTranscriber:
         while self.running:
             for wav_file in self.audio_dir.glob("*.wav"):
                 created_time = get_create_time(wav_file)
-                if wav_file not in seen and created_time + (self.segment_time + 2) < time.time():
+                if wav_file not in seen and created_time + (self.segment_time + 1.5) < time.time():
                     if has_speech(wav_file):
                         logger.info(f"Detected new file: {wav_file}")
                         self.file_queue.put(wav_file)
@@ -131,15 +88,24 @@ class TwitchTranscriber:
                     seen.add(wav_file)
             time.sleep(1)
 
-    def _is_file_ready(self, path: Path) -> bool:
-        """Check if file is stable (not growing)."""
+    def get_latest_transcription(self, n=30) -> str:
+        """Get the latest transcription from the transcript file."""
         try:
-            size1 = path.stat().st_size
-            time.sleep(1)
-            size2 = path.stat().st_size
-            return size1 == size2
+            with(open(self.out_file, "r", encoding="utf-8")) as f:
+                lines = f.readlines()
+
+            if not lines:
+                logger.warning("Transcript file is empty.")
+                return ""
+
+            # Get last 30 lines, 5min for 10s segments
+            transcriptions = lines[-n:]
+            transcriptions = [line.strip() for line in transcriptions if line.strip()]
+            transcriptions = [line.split("  ")[-1] for line in transcriptions]
+            return transcriptions
+        
         except FileNotFoundError:
-            return False
+            return ""
 
     def _model_worker(self, model_idx: int):
         while self.running:
@@ -155,8 +121,10 @@ class TwitchTranscriber:
                 ctime = time.ctime()
                 result = self.models[model_idx].transcribe(str(wav_file))
                 logger.info(f"Model {model_idx} finished {wav_file}")
+                transcription = result['text']
+                self.flag_check(transcription)
                 with open(self.out_file, "a", encoding="utf-8") as f:
-                    f.write(f"{ctime} {result['text']}\n")
+                    f.write(f"{ctime} {transcription}\n")
 
                 self.file_queue.task_done()
                 self.remove_file(wav_file)

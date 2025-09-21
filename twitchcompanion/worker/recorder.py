@@ -1,19 +1,21 @@
 import os
 import subprocess
-import threading
 from pathlib import Path
 
 from twitchcompanion.logger import logger as MainLogger
 
 # create a child logger
 logger = MainLogger.getChild(__name__)
-
-# disable for this file
 logger.disabled = True
 
 
 class TwitchRecorder:
-    def __init__(self, twitch_url: str, audio_dir: str, segment_time: int):
+    def __init__(
+            self, 
+            twitch_url: str, 
+            audio_dir: str, 
+            segment_time: int,
+        ):
         self.twitch_url = twitch_url
         self.audio_dir = audio_dir
         self.segment_time = segment_time
