@@ -10,6 +10,7 @@ from mistralai import Mistral
 from twitchcompanion.logger import logger as MainLogger
 from twitchcompanion.twitch import TwitchClient
 from twitchcompanion.worker import TwitchRecorder, TwitchTranscriber
+from twitchcompanion.worker.live import TwitchStreamAudio, LiveWhisperTranscriber
 
 load_dotenv()
 
@@ -18,15 +19,19 @@ logger = MainLogger.getChild(__name__)
 logger.disabled = False
 
 class TwitchWatcher:
-    def __init__(self, channel: str, check_interval: int = 30, response_interval: int = 60, words_file = None, **kwargs):
+    def __init__(self, channel: str, check_interval: int = 30, response_interval: int = 60, words_file = None, live_mode: bool = True, **kwargs):
         self.channel = channel
         self.check_interval = check_interval
         self.response_interval = response_interval
         self.running = False
-        self.recorder = None
-        self.transcriber = None
+        self.live_mode = live_mode
         self.output_dir = Path("output") / self.channel
         self.twitch_url = f"https://twitch.tv/{self.channel}"
+        
+        # Initialize components based on mode
+        self.stream_audio = None
+        self.recorder = None
+        self.transcriber = None
         os.makedirs(self.output_dir, exist_ok=True)
         self.api_key = os.environ["MISTRAL_API_KEY"]
         self.model = "mistral-small-latest"
@@ -40,6 +45,7 @@ class TwitchWatcher:
         self.on_work_response = words_file is not None
         self.words_file = words_file
         self.no_send = kwargs.get('no_send', False)
+        self.no_ai = kwargs.get('no_ai', False)
 
         self.twitch_client = TwitchClient(self.channel)
 
@@ -74,26 +80,38 @@ class TwitchWatcher:
         while True:
             online = self.is_stream_online()
             if online and not self.running:
-                print("✅ Stream is live! Starting recording + transcription...")
+                print("✅ Stream is live! Starting transcription...")
                 self.running = True
 
-                audio_dir = self.output_dir / "audio_chunks"
-
-                # spawn recorder + transcriber
-                self.transcriber = TwitchTranscriber(
-                    audio_dir=audio_dir, 
-                    segment_time=self.segment_time,
-                    whisper_model_size=whisper_model_size,
-                    words_file = self.words_file,
-                )
-                self.recorder = TwitchRecorder(
-                    self.twitch_url, 
-                    audio_dir=audio_dir,
-                    segment_time=self.segment_time,
-                )
-
-                self.recorder.start()
-                self.transcriber.start()
+                if self.live_mode:
+                    # Live mode: use real-time audio processing
+                    self.stream_audio = TwitchStreamAudio(
+                        self.twitch_url
+                    )
+                    self.transcriber = LiveWhisperTranscriber(
+                        self.stream_audio,
+                        out_dir=self.output_dir,
+                        model_size=whisper_model_size,
+                        device="cpu"
+                    )
+                    self.stream_audio.start()
+                    self.transcriber.start()
+                else:
+                    # Recorded mode: use chunked audio files
+                    audio_dir = self.output_dir / "audio_chunks"
+                    self.transcriber = TwitchTranscriber(
+                        audio_dir=audio_dir, 
+                        segment_time=self.segment_time,
+                        whisper_model_size=whisper_model_size,
+                        words_file=self.words_file,
+                    )
+                    self.recorder = TwitchRecorder(
+                        self.twitch_url, 
+                        audio_dir=audio_dir,
+                        segment_time=self.segment_time,
+                    )
+                    self.recorder.start()
+                    self.transcriber.start()
 
             elif not online and self.running:
                 print("❌ Stream went offline. Stopping...")
@@ -103,6 +121,19 @@ class TwitchWatcher:
                 self.generate_response()
 
             time.sleep(self.check_interval)
+
+    def stop(self):
+        self.running = False
+        if self.live_mode:
+            if self.stream_audio:
+                self.stream_audio.stop()
+            if self.transcriber:
+                self.transcriber.stop()
+        else:
+            if self.recorder:
+                self.recorder.stop()
+            if self.transcriber:
+                self.transcriber.stop()
 
     def should_respond(self):
         if self.response_interval is not None:
@@ -115,6 +146,9 @@ class TwitchWatcher:
 
     def should_send(self, message: str):
         if self.no_send:
+            return False
+
+        if self.no_ai:
             return False
         
         if message in self.response_history:
@@ -130,42 +164,47 @@ class TwitchWatcher:
         logger.info("Generating response...")
 
         latest_transcription = self.transcriber.get_latest_transcription()
+        
         logger.debug(f"Latest transcription: {latest_transcription}")
 
-        role_message = ("" +
-            "You are a stream companion," +
-            "Your role is to interact with the streamer and the viewers in a fun and engaging way." +
-            "You must write the answer in french." +
-            "Your name is NIOX, The streamer can ask you specific thing by calling you NIOX, you must anwser his questions and though",
-            f"The title of the stream is {self.title}. " +
-            f"The streamer name is {self.channel}. He is actually playing {self.category}." +
-            "You must interact with the streamer based on what he his saying. Keep your responses short and engaging." +
-            "You can make jokes and be funny or even silly. Do not mention you are an AI model or chatbot." +
-            "Caution some of the things in the transcription may be inaccurate. and some may come from the background music do not take these into account" +
-            "Here are some recent things that have been said comming from the automatic transcription:\n" + "\n".join(latest_transcription)
+        role_message = (
+            "You are a stream companion. "
+            "Your role is to interact with the streamer and the viewers in a fun and engaging way. "
+            "You must write the answer in French. "
+            "Your name is NIOX; the streamer can ask you specific things by calling you NIOX, and you must answer accordingly. "
+            f"The title of the stream is {self.title}. "
+            f"The streamer name is {self.channel}. He is currently playing {self.category}. "
+            "You must interact with the streamer based on what he is saying. Keep your responses short and engaging. "
+            "You can make jokes and be funny or even silly. Do not mention you are an AI model or chatbot. "
+            "Caution: some of the things in the transcription may be inaccurate or come from the background music. "
+            "Here are some recent things that have been said coming from the automatic transcription:\n"
+            + "\n".join(latest_transcription)
         )
 
-        chat_response = self.client.chat.complete(
-            model = self.model,
-            messages = [
-                {
-                    "role": "system",
-                    "content": role_message
-                },
-                {
-                    "role": "user",
-                    "content": "Write a short message to the chat based on the above context without apostrophes."
-                }
-            ],
-            temperature=0.4,
-            max_tokens=15,
-            safe_prompt=True,
-            random_seed=self.num_response,
-        )
+        if not self.no_ai:
+            chat_response = self.client.chat.complete(
+                model = self.model,
+                messages = [
+                    {
+                        "role": "system",
+                        "content": role_message
+                    },
+                    {
+                        "role": "user",
+                        "content": "Write a short message to the chat based on the above context without apostrophes."
+                    }
+                ],
+                temperature=0.4,
+                max_tokens=15,
+                safe_prompt=True,
+                random_seed=self.num_response,
+            )
 
-        # TODO add chat messages to context if possible
+            # TODO add chat messages to context if possible
 
-        message = chat_response.choices[0].message.content
+            message = chat_response.choices[0].message.content
+        else:
+            message = "Je suis désolé, je ne peux pas répondre pour le moment."
 
         if self.should_send(message):
             self.response_history.append(message)
@@ -183,16 +222,6 @@ class TwitchWatcher:
             f.write(f"{ctime} : {message}\n")
         self.last_response = time.time()
 
-    def stop(self):
-        self.running = False
-        if self.recorder:
-            self.recorder.stop()
-            self.recorder = None
-        if self.transcriber:
-            self.transcriber.stop()
-            self.transcriber = None
-        print("TwitchWatcher stopped.")
-
 def get_args():
     import argparse
     parser = argparse.ArgumentParser(description="Twitch Stream Watcher")
@@ -203,6 +232,7 @@ def get_args():
     parser.add_argument("--delete-audio", action="store_true", default=False, help="Delete audio file after processing")
     parser.add_argument('--word-file', type=str, default="twitchcompanion/words.txt", help="File of words to activate response on call")
     parser.add_argument('--no-send', action="store_true", default=False, help="Do not send message to streamer")
+    parser.add_argument('--no-ai', action="store_true", default=False, help="Do not call mistral")
     return parser
 
 def main():

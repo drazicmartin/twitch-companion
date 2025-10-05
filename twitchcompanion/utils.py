@@ -2,7 +2,6 @@ import contextlib
 import os
 import wave
 
-import webrtcvad
 
 
 def has_speech(wav_path: str, aggressiveness: int = 1) -> bool:
@@ -12,6 +11,7 @@ def has_speech(wav_path: str, aggressiveness: int = 1) -> bool:
     aggressiveness: 0 (least) -> 3 (most aggressive)
     """
     return True
+    import webrtcvad
     vad = webrtcvad.Vad(aggressiveness)
 
     with contextlib.closing(wave.open(str(wav_path), 'rb')) as wf:
