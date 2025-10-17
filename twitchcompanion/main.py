@@ -195,7 +195,7 @@ class TwitchWatcher:
                     }
                 ],
                 temperature=0.4,
-                max_tokens=15,
+                max_tokens=30,
                 safe_prompt=True,
                 random_seed=self.num_response,
             )
@@ -233,6 +233,7 @@ def get_args():
     parser.add_argument('--word-file', type=str, default="twitchcompanion/words.txt", help="File of words to activate response on call")
     parser.add_argument('--no-send', action="store_true", default=False, help="Do not send message to streamer")
     parser.add_argument('--no-ai', action="store_true", default=False, help="Do not call mistral")
+    parser.add_argument('--live-mode', action="store_true", default=False, help="Use live audio processing instead of recorded chunks")
     return parser
 
 def main():
