@@ -123,7 +123,7 @@ class TwitchWatcher:
                 self.stop()
             
             if self.running:
-                self.response_loop()
+                self._response_main()
 
             time.sleep(self.check_interval)
 
@@ -178,7 +178,7 @@ class TwitchWatcher:
             f.write(f"{ctime} : {message}\n")
         self.last_response = time.time()
 
-    def response_loop(self):
+    def _response_main(self):
         """Generate a response based on the latest transcription."""
         if not self.should_respond():
             return  # too soon to respond again

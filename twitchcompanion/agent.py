@@ -63,7 +63,7 @@ class TwitchAgent(TwitchWatcher):
         super().start_workers(whisper_model_size=whisper_model_size)
         self.init_agent()
 
-    def response_loop(self): 
+    def _response_main(self): 
         """Invoke the agent with the current context."""
         if not self.should_respond():
             return  # too soon to respond again
@@ -93,7 +93,7 @@ class TwitchAgent(TwitchWatcher):
 def test():
     agent = TwitchAgent(channel="etaneex")
     agent.init_agent()
-    response = agent.response_loop()
+    response = agent._response_main()
     print(response)
 
 if __name__ == "__main__":
