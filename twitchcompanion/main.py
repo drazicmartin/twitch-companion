@@ -109,6 +109,15 @@ class TwitchWatcher:
             self.recorder.start()
             self.transcriber.start()
 
+    def _loop(self):
+        tic = time.time()
+        while self.running:
+            self.transcriber.solo_main()
+            time.sleep(1)
+            if time.time() - tic > self.response_interval:
+                self._response_main()
+                tic = time.time() 
+
     def start(self, whisper_model_size: str = "small"):
         while True:
             online = self.is_stream_online()

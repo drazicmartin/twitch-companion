@@ -44,18 +44,14 @@ class TwitchTranscriber:
 
         logger.info("Transcriber initialized.")
 
-    def _solo_loop(self):
+    def solo_main(self):
         """Single-threaded transcription loop."""
-        while self.running:
+        if self.running:
             try:
                 wav_file = self.file_queue.get(timeout=1)
             except Empty:
-                a = len(self.seen)
                 self._scanner_main()
-                b = len(self.seen)
-                if a == b:
-                    time.sleep(1)
-                continue
+                return
 
             self._model_main(self.models[0], wav_file)
 
