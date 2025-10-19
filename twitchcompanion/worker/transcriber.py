@@ -57,10 +57,10 @@ class TwitchTranscriber:
 
     def start(self):
         # Start worker threads
-        logger.info("Starting transcription workers...")
         if self.n_models == 1:
-            self._solo_loop()
+            return # managed by parent class
         else:
+            logger.info("Starting transcription workers...")
             for idx in range(self.n_models):
                 t = Thread(target=self._model_worker_loop, args=(idx,), daemon=True)
                 t.start()

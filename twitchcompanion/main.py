@@ -132,7 +132,7 @@ class TwitchWatcher:
                 self.stop()
             
             if self.running:
-                self._response_main()
+                self._loop()
 
             time.sleep(self.check_interval)
 

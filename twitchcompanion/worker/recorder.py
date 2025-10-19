@@ -24,7 +24,7 @@ class TwitchRecorder:
         self._ffmpeg_proc = None
         self._thread = None
 
-    def _record_loop(self):
+    def _record_main(self):
         os.makedirs(self.audio_dir, exist_ok=True)
 
         streamlink_cmd = ["streamlink", "--stdout", self.twitch_url, "audio_only"]
@@ -57,7 +57,7 @@ class TwitchRecorder:
             logger.warning("Recording is already running.")
             return
 
-        self._record_loop()
+        self._record_main()
 
     def stop(self):
         """Stops recording gracefully."""
