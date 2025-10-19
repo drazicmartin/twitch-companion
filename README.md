@@ -9,10 +9,12 @@
 ```bash
 # inside .env
 MISTRAL_API_KEY=TODO
+ANTHROPIC_API_KEY=TODO
 TWITCH_ACCESS_TOKEN=TODO
 
-python twitchcompanion/main.py --channel <channel_name> --whisper_model_size <tiny|base|small|medium|large>
+python tools/run.py --channel <channel_name> --whisper_model_size <tiny|base|small|medium|large>
 
 ## example
-python twitchcompanion/main.py --channel etaneex --whisper-model-size medium
+python tools/run.py --channel etaneex --whisper-model-size medium
+python tools/run.py --channel sardoche --whisper-model-size large
 ```

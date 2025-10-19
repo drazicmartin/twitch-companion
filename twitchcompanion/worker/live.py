@@ -94,7 +94,7 @@ class TwitchStreamAudio:
                 pass
 
 class LiveWhisperTranscriber:
-    def __init__(self, streamer: TwitchStreamAudio, out_dir: str, model_size="small", device="cpu", window_sec=6, step_sec=3,):
+    def __init__(self, streamer: TwitchStreamAudio, out_dir: str, model_size="small", device="cuda", window_sec=6, step_sec=3,):
         self.streamer = streamer
         self.model = WhisperModel(model_size, device=device, compute_type="float16" if device == "cuda" else "int8")
         self.running = False

@@ -1,4 +1,5 @@
 from twitchcompanion.main import TwitchWatcher
+from twitchcompanion.agent import TwitchAgent
 
 def get_args():
     import argparse
@@ -18,11 +19,13 @@ def main():
     args = get_args().parse_args()
     args_dict = vars(args)
     
-    watcher = TwitchWatcher(**args_dict)
+    # watcher = TwitchWatcher(**args_dict)
+    agent = TwitchAgent(**args_dict)  # Initialize agent (if needed)
+    
 
     try:
         # Start watching (this will manage recorder + transcriber automatically)
-        watcher.start(whisper_model_size=args.whisper_model_size)
+        agent.start(whisper_model_size=args.whisper_model_size)
 
         print("Watcher running. Press Ctrl+C to stop.")
         import time
@@ -31,7 +34,7 @@ def main():
 
     except KeyboardInterrupt:
         print("Stopping TwitchWatcher...")
-        watcher.stop()  # optional: if you implement stop in TwitchWatcher
+        agent.stop()  # optional: if you implement stop in TwitchWatcher
         print("Watcher stopped.")
 
 

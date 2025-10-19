@@ -1,3 +1,4 @@
+import concurrent.futures
 import os
 import time
 from pathlib import Path
@@ -19,7 +20,7 @@ logger.disabled = False
 class TwitchTranscriber:
     def __init__(self, audio_dir: str, segment_time: int, whisper_model_size: str = "medium",  n_models: int = 1, words_file: str = None):
         self.audio_dir = Path(audio_dir)
-        self.out_file = self.audio_dir.parent / "transcript.txt"
+        self.out_file = self.audio_dir.parent / "transcription.txt"
         self.running = True
         self.do_remove = False
         self.segment_time = segment_time
@@ -28,31 +29,51 @@ class TwitchTranscriber:
         self.n_models = n_models
         self.worker_threads = []
         logger.info(f"Loading {n_models} Whisper models of size '{whisper_model_size}'...")
-        self.models = [whisper.load_model(whisper_model_size) for _ in range(n_models)]
+        self.models = [whisper.load_model(whisper_model_size, device="cuda" if self.n_models == 1 else "cpu") for _ in range(n_models)]
 
         self.flagged = False
         self.flag_words = []
         if words_file is not None:
-            with open(words_file, 'r') as f:
+            with open(words_file, 'r', encoding="utf-8") as f:
                 lines = f.readlines()
             self.flag_words = lines
 
         # Queue of files ready to transcribe
         self.file_queue = Queue()
+        self.seen = set()
 
         logger.info("Transcriber initialized.")
+
+    def _solo_loop(self):
+        """Single-threaded transcription loop."""
+        while self.running:
+            try:
+                wav_file = self.file_queue.get(timeout=1)
+            except Empty:
+                a = len(self.seen)
+                self._scanner_main()
+                b = len(self.seen)
+                if a == b:
+                    time.sleep(1)
+                continue
+
+            self._model_main(self.models[0], wav_file)
 
     def start(self):
         # Start worker threads
         logger.info("Starting transcription workers...")
-        for idx in range(self.n_models):
-            t = Thread(target=self._model_worker, args=(idx,), daemon=True)
-            t.start()
-            self.worker_threads.append(t)
+        if self.n_models == 1:
+            self._solo_loop()
+        else:
+            for idx in range(self.n_models):
+                t = Thread(target=self._model_worker_loop, args=(idx,), daemon=True)
+                t.start()
+                self.worker_threads.append(t)
 
-        # Start scanner thread
-        self.scanner_thread = Thread(target=self._scanner_loop, daemon=True)
-        self.scanner_thread.start()
+            # Start scanner thread
+            self.scanner_thread = Thread(target=self._scanner_loop, daemon=True)
+            self.scanner_thread.start()
+
 
     def remove_file(self, path: Path):
         if self.do_remove:
@@ -71,21 +92,23 @@ class TwitchTranscriber:
                 return True
         return False
 
+    def _scanner_main(self):
+        for wav_file in self.audio_dir.glob("*.wav"):
+            created_time = get_create_time(wav_file)
+            if wav_file not in self.seen and created_time + (self.segment_time + 1.5) < time.time():
+                if has_speech(wav_file):
+                    logger.info(f"Detected new file: {wav_file}")
+                    self.file_queue.put(wav_file)
+                else:
+                    logger.info(f"Skipping silent file: {wav_file}")
+                    self.remove_file(wav_file)
+                self.seen.add(wav_file)
+
     def _scanner_loop(self):
         """Continuously scan the folder for ready files and put them in queue."""
-        seen = set()
         logger.info("Starting file scanner...")
         while self.running:
-            for wav_file in self.audio_dir.glob("*.wav"):
-                created_time = get_create_time(wav_file)
-                if wav_file not in seen and created_time + (self.segment_time + 1.5) < time.time():
-                    if has_speech(wav_file):
-                        logger.info(f"Detected new file: {wav_file}")
-                        self.file_queue.put(wav_file)
-                    else:
-                        logger.info(f"Skipping silent file: {wav_file}")
-                        self.remove_file(wav_file)
-                    seen.add(wav_file)
+            self._scanner_main()
             time.sleep(1)
 
     def get_latest_transcription(self, n=30) -> str:
@@ -107,29 +130,32 @@ class TwitchTranscriber:
         except FileNotFoundError:
             return ""
 
-    def _model_worker(self, model_idx: int):
+    def _model_main(self, model, wav_file: Path):
+        try:
+            start_size = os.path.getsize(wav_file)
+            logger.debug(f"Model picked up {Path(wav_file).name} (size: {start_size})")
+            logger.info(f"Model transcribing {wav_file}...")
+            ctime = time.ctime()
+            result = model.transcribe(str(wav_file))
+            logger.info(f"Model finished {wav_file}")
+            transcription = result['text']
+            self.flag_check(transcription)
+            with open(self.out_file, "a", encoding="utf-8") as f:
+                f.write(f"{ctime} {transcription}\n")
+
+            self.file_queue.task_done()
+            self.remove_file(wav_file)
+        except Exception as e:
+            logger.error(f"Error transcribing {wav_file}: {e}")
+
+    def _model_worker_loop(self, model_idx: int):
         while self.running:
             try:
                 wav_file = self.file_queue.get(timeout=1)
             except Empty:
                 continue
 
-            try:
-                start_size = os.path.getsize(wav_file)
-                logger.debug(f"Model {model_idx} picked up {Path(wav_file).name} (size: {start_size})")
-                logger.info(f"Model {model_idx} transcribing {wav_file}...")
-                ctime = time.ctime()
-                result = self.models[model_idx].transcribe(str(wav_file))
-                logger.info(f"Model {model_idx} finished {wav_file}")
-                transcription = result['text']
-                self.flag_check(transcription)
-                with open(self.out_file, "a", encoding="utf-8") as f:
-                    f.write(f"{ctime} {transcription}\n")
-
-                self.file_queue.task_done()
-                self.remove_file(wav_file)
-            except Exception as e:
-                logger.error(f"Error transcribing {wav_file}: {e}")
+            self._model_main(self.models[model_idx], wav_file)
 
     def stop(self):
         self.running = False
@@ -137,6 +163,8 @@ class TwitchTranscriber:
         # Add a reasonable timeout (e.g., 5 seconds)
         timeout = 5.0
         
+        if self.n_models == 1:
+            return  # no threads to stop
         # Wait for threads with timeout
         for t in self.worker_threads:
             t.join(timeout=timeout)

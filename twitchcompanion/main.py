@@ -6,6 +6,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from mistralai import Mistral
+import torch
 
 from twitchcompanion.logger import logger as MainLogger
 from twitchcompanion.twitch import TwitchClient
@@ -27,6 +28,7 @@ class TwitchWatcher:
         self.live_mode = live_mode
         self.output_dir = Path("output") / self.channel
         self.twitch_url = f"https://twitch.tv/{self.channel}"
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # Initialize components based on mode
         self.stream_audio = None
@@ -68,13 +70,44 @@ class TwitchWatcher:
                 self.title = data['metadata'].get("title", "Unknown Title")
                 self.category = data['metadata'].get("category", "Unknown Game")
                 self.broadcaster_id = data['metadata'].get("id", None)
-                with open(self.output_dir / "stream_info.json", "w") as f:
+                with open(self.output_dir / "stream_info.json", "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=4)
                 return True
             return False
         except Exception as e:
             print("Error checking stream:", e)
             return False
+
+    def start_workers(self, whisper_model_size):
+        if self.live_mode:
+            # Live mode: use real-time audio processing
+            self.stream_audio = TwitchStreamAudio(
+                self.twitch_url
+            )
+            self.transcriber = LiveWhisperTranscriber(
+                self.stream_audio,
+                out_dir=self.output_dir,
+                model_size=whisper_model_size,
+                device=self.device,
+            )
+            self.stream_audio.start()
+            self.transcriber.start()
+        else:
+            # Recorded mode: use chunked audio files
+            audio_dir = self.output_dir / "audio_chunks"
+            self.transcriber = TwitchTranscriber(
+                audio_dir=audio_dir, 
+                segment_time=self.segment_time,
+                whisper_model_size=whisper_model_size,
+                words_file=self.words_file,
+            )
+            self.recorder = TwitchRecorder(
+                self.twitch_url, 
+                audio_dir=audio_dir,
+                segment_time=self.segment_time,
+            )
+            self.recorder.start()
+            self.transcriber.start()
 
     def start(self, whisper_model_size: str = "small"):
         while True:
@@ -83,42 +116,14 @@ class TwitchWatcher:
                 print("✅ Stream is live! Starting transcription...")
                 self.running = True
 
-                if self.live_mode:
-                    # Live mode: use real-time audio processing
-                    self.stream_audio = TwitchStreamAudio(
-                        self.twitch_url
-                    )
-                    self.transcriber = LiveWhisperTranscriber(
-                        self.stream_audio,
-                        out_dir=self.output_dir,
-                        model_size=whisper_model_size,
-                        device="cpu"
-                    )
-                    self.stream_audio.start()
-                    self.transcriber.start()
-                else:
-                    # Recorded mode: use chunked audio files
-                    audio_dir = self.output_dir / "audio_chunks"
-                    self.transcriber = TwitchTranscriber(
-                        audio_dir=audio_dir, 
-                        segment_time=self.segment_time,
-                        whisper_model_size=whisper_model_size,
-                        words_file=self.words_file,
-                    )
-                    self.recorder = TwitchRecorder(
-                        self.twitch_url, 
-                        audio_dir=audio_dir,
-                        segment_time=self.segment_time,
-                    )
-                    self.recorder.start()
-                    self.transcriber.start()
+                self.start_workers(whisper_model_size=whisper_model_size)
 
             elif not online and self.running:
                 print("❌ Stream went offline. Stopping...")
                 self.stop()
             
             if self.running:
-                self.generate_response()
+                self.response_loop()
 
             time.sleep(self.check_interval)
 
@@ -156,7 +161,24 @@ class TwitchWatcher:
 
         return True
 
-    def generate_response(self):
+    def handle_send(self, message: str):
+        if self.should_send(message):
+            self.response_history.append(message)
+            try:
+                self.twitch_client.send_message(
+                    message=message
+                )
+                self.num_response += 1
+            except Exception as e:
+                logger.error(f"Error sending message to Twitch chat: {e}")
+
+        logger.debug(f"Response generated: {message}")
+        with open(self.response_file, 'a', encoding="utf-8") as f:
+            ctime = time.ctime()
+            f.write(f"{ctime} : {message}\n")
+        self.last_response = time.time()
+
+    def response_loop(self):
         """Generate a response based on the latest transcription."""
         if not self.should_respond():
             return  # too soon to respond again
@@ -206,18 +228,4 @@ class TwitchWatcher:
         else:
             message = "Je suis désolé, je ne peux pas répondre pour le moment."
 
-        if self.should_send(message):
-            self.response_history.append(message)
-            try:
-                self.twitch_client.send_message(
-                    message=message
-                )
-                self.num_response += 1
-            except Exception as e:
-                logger.error(f"Error sending message to Twitch chat: {e}")
-
-        logger.debug(f"Response generated: {message}")
-        with open(self.response_file, 'a') as f:
-            ctime = time.ctime()
-            f.write(f"{ctime} : {message}\n")
-        self.last_response = time.time()
+        self.handle_send(message)
